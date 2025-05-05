@@ -7,75 +7,195 @@ const client = new djs.Client({
 const settings = require('./settings.json');
 
 class Country {
-	constructor(country, industry, army, tank, money, type, flag) {
-		this.country = country;
-		this.pid = '';
-		this.industry = industry;
-		this.army = army;
-		this.tank = tank;
-		this.money = money;
-		this.type = type;
-		this.flag = flag || '🏳️';
-		this.active = true;
-	}
+    constructor(country, industry, money, technologyLevel, units, type, flag, hp = 100) {
+        this.country = country;
+        this.pid = '';
+        this.industry = industry;
+        this.money = money;
+        this.technologyLevel = technologyLevel; // Represents technological advancement (0–100%)
+        this.units = units; // Object with unit counts: { Infantry: X, Cavalry: Y, Artillery: Z }
+        this.type = type;
+        this.flag = flag || '🏳️';
+        this.hp = hp; // Health points of the nation
+        this.active = true;
+    }
 
-	getWarScore() {
-		return this.army + Math.floor(this.army * (this.tank / 50));
-	}
+    // Calculate the war score for a country based on its units and technology level
+    getWarScore() {
+        const unitStats = {
+            Infantry: { attack: 1, defense: 1 },
+            Cavalry: { attack: 5, defense: 10 },
+            Artillery: { attack: 10, defense: 5 },
+        };
 
-	/**
-	 * Calculates the result of a war between an attacker and a defender.
-	 * @param {Attacker} attacker - The attacking entity.
-	 * @param {Defender} defender - The defending entity.
-	 * @returns {Object} - An object containing the winner, loser, and casualties of the war.
-	 */
-static getWarResult(attacker, defender) {
-	const attackerScore = attacker.getWarScore();
-	const defenderScore = defender.getWarScore() * 1.2;
-	const totalScore = attackerScore + defenderScore;
-	const rng = Math.floor(Math.random() * totalScore);
-	const atkLoses = attacker.applyattackerWarCasualties(attacker, defender);
-	const defLoses = defender.applydefenderWarCasualties(defender, attacker);
-	return {
-		winner: rng < attackerScore ? attacker : defender,
-		loser: rng < attackerScore ? defender : attacker,
-		atkLoses,
-		defLoses,
-	};
+        let totalAttack = 0;
+        let totalDefense = 0;
+
+        for (const [unitType, count] of Object.entries(this.units)) {
+            totalAttack += unitStats[unitType].attack * count;
+            totalDefense += unitStats[unitType].defense * count;
+        }
+
+        // Amplify by technology level
+        totalAttack += totalAttack * (this.technologyLevel / 100);
+        totalDefense += totalDefense * (this.technologyLevel / 100);
+
+        return { attack: totalAttack, defense: totalDefense };
+    }
+
+    /**
+     * Simulates a single battle between two countries and determines the outcome.
+     * @param {Country} attacker - The attacking country.
+     * @param {Country} defender - The defending country.
+     * @returns {Object} - The result of the battle, including winner, loser, casualties, and r_diff.
+     */
+    static getBattleResult(attacker, defender) {
+        // Ensure both nations have units to fight
+        if (!attacker.hasUnits() || !defender.hasUnits()) {
+            throw new Error("One or both nations do not have any units left to fight.");
+        }
+
+        const attackerStats = attacker.getWarScore();
+        const defenderStats = defender.getWarScore();
+
+        // Calculate r_diff
+        const atk_x = attackerStats.attack;
+        const def_x = attackerStats.defense;
+        const atk_y = defenderStats.attack;
+        const def_y = defenderStats.defense;
+        const r_diff = (atk_x - def_y) - (atk_y - def_x);
+
+        // Random factors to add unpredictability
+        const attackerRandomFactor = Math.random() * 0.2 + 0.9; // Random factor between 0.9 and 1.1
+        const defenderRandomFactor = Math.random() * 0.2 + 0.9; // Random factor between 0.9 and 1.1
+
+        const adjustedAtkPower = atk_x * attackerRandomFactor - def_y;
+        const adjustedDefPower = atk_y * defenderRandomFactor - def_x;
+
+        const totalPower = Math.max(1, adjustedAtkPower + adjustedDefPower); // Ensure no division by zero
+        const winProbability = Math.max(0.2, Math.min(0.8, adjustedAtkPower / totalPower)); // Cap probability between 20% and 80%
+
+        // Randomized outcome
+        const rng = Math.random();
+        const winner = rng < winProbability ? attacker : defender;
+        const loser = winner === attacker ? defender : attacker;
+
+        // Calculate casualties for both sides based on r_diff
+        const atkLoses = attacker.applyCasualties(r_diff, winner === defender);
+        const defLoses = defender.applyCasualties(r_diff, winner === attacker);
+
+        // Adjust HP
+        if (winner === attacker) {
+            defender.hp = Math.max(0, defender.hp - 10);
+        } else {
+            attacker.hp = Math.max(0, attacker.hp - 10);
+        }
+
+        return {
+            winner,
+            loser,
+            atkLoses,
+            defLoses,
+            r_diff,
+        };
+    }
+
+    /**
+     * Applies casualties to a country based on r_diff.
+     * @param {number} r_diff - The power difference between the attacker and defender.
+     * @param {boolean} isLosingSide - Whether the country is the losing side.
+     * @returns {Object} - The casualties sustained for each unit type.
+     */
+    applyCasualties(r_diff, isLosingSide) {
+        const casualties = {};
+
+        // Reduce the impact of r_diff using a logarithmic scale
+        const scaledRDiff = Math.log(1 + Math.abs(r_diff)) * (isLosingSide ? 0.02 : 0.01);
+
+        // Base casualty rates (further reduced)
+        const baseCasualtyRate = isLosingSide ? 0.01 : 0.005; // Losing side loses slightly more
+        const casualtyRate = baseCasualtyRate + scaledRDiff;
+
+        // Loop through each unit type and calculate casualties
+        for (const unitType in this.units) {
+            const maxLosses = this.units[unitType];
+
+            // Calculate casualties for this unit type
+            let unitCasualties = Math.floor(casualtyRate * maxLosses);
+
+            // Cap the maximum losses to avoid full annihilation in one battle
+            const maxAllowedLosses = Math.ceil(maxLosses * 0.2); // Max 20% of units lost in one battle
+            unitCasualties = Math.min(unitCasualties, maxAllowedLosses);
+
+            // Ensure at least 1 casualty if units remain
+            if (unitCasualties < 1 && maxLosses > 0) {
+                unitCasualties = 1;
+            }
+
+            // Apply casualties and track losses
+            casualties[unitType] = unitCasualties;
+            this.units[unitType] -= unitCasualties;
+        }
+
+        return casualties;
+    }
+
+    /**
+     * Checks if the nation has any units left to fight.
+     * @returns {boolean} - True if the nation has units, false otherwise.
+     */
+    hasUnits() {
+        return Object.values(this.units).some((count) => count > 0);
+    }
+
+    /**
+     * Simulates a full war between two countries, where they attack each other until one reaches 0 HP.
+     * @param {Country} nation1 - The first country involved in the war.
+     * @param {Country} nation2 - The second country involved in the war.
+     * @returns {Object} - The result of the war, including the winner, loser, and battle history.
+     */
+    static simulateWar(nation1, nation2) {
+        const battleHistory = [];
+        let round = 1;
+
+        while (nation1.hp > 0 && nation2.hp > 0 && nation1.hasUnits() && nation2.hasUnits()) {
+            console.log(`--- Battle ${round} ---`);
+            const battleResult = this.getBattleResult(nation1, nation2);
+            battleHistory.push({
+                round,
+                winner: battleResult.winner.country,
+                loser: battleResult.loser.country,
+                r_diff: battleResult.r_diff,
+                nation1Hp: nation1.hp,
+                nation2Hp: nation2.hp,
+                atkLoses: battleResult.atkLoses,
+                defLoses: battleResult.defLoses,
+            });
+
+            round++;
+        }
+
+        const winner = nation1.hp > 0 && nation1.hasUnits() ? nation1 : nation2;
+        const loser = nation1.hp > 0 && nation1.hasUnits() ? nation2 : nation1;
+
+        return {
+            winner: winner.country,
+            loser: loser.country,
+            remainingHp: winner.hp,
+            battleHistory,
+        };
+    }
 }
 
-applyattackerWarCasualties(attacker, defender, casualties) {
-	const attackerScore = attacker.getWarScore();
-	const defenderScore = defender.getWarScore() * 1.2;
-	if (attackerScore / defenderScore < 1) {
-		casualties = Math.floor(Math.random() * 0.07 * this.army + 0.1 * this.army);
-	} 
-	else { 
-		casualties = Math.floor(Math.random() * 0.07 * this.army + 0.1 * this.army *((1) / (attackerScore / defenderScore)));
-	}
-	if (casualties < 1) {
-		casualties = 1;
-	}
-	this.army -= casualties;
-	return casualties;
-}
+// Example Usage
+const nation1 = new Country('Nation A', 100, 1000, 80, { Infantry: 500, Cavalry: 200, Artillery: 50 }, 'industrial', '🏴');
+const nation2 = new Country('Nation B', 120, 1500, 90, { Infantry: 400, Cavalry: 150, Artillery: 70 }, 'agricultural', '🏳️');
 
-applydefenderWarCasualties (defender, attacker, casualties) {
-	const attackerScore = attacker.getWarScore();
-	const defenderScore = defender.getWarScore() * 1.2;
-	if (defenderScore / attackerScore < 1) {
-		casualties = Math.floor(Math.random() * 0.04 * this.army + 0.1 * this.army);
-	} 
-	else {
-		casualties = Math.floor(Math.random() * 0.04 * this.army + 0.1 * this.army * (1) / (defenderScore / attackerScore))
-	}
-	if (casualties < 1 && this.army >= 1) {
-		casualties = 1;
-	}
-	this.army -= casualties;
-	return casualties;
-}
-}
+// Simulate a full war
+const warResult = Country.simulateWar(nation1, nation2);
+
+console.log('War Result:', warResult);
+console.log('Battle History:', warResult.battleHistory);
 
 class Game {
 		constructor() {
